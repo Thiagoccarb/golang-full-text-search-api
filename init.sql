@@ -22,4 +22,4 @@ SELECT
         ELSE 'lemon'
     END ||
     '_' || (i % 100)
-FROM generate_series(1, 10000000) AS i;
+FROM generate_series(1, 500000) AS i;

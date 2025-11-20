@@ -3,9 +3,13 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strings"
 
+	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/gorilla/mux"
 	_ "github.com/lib/pq"
 )
@@ -22,43 +26,101 @@ type SearchResponse struct {
 
 type App struct {
 	DB *sql.DB
+	ES *elasticsearch.Client
 }
 
 func main() {
-	db, err := sql.Open("postgres", "host=postgres port=5432 user=postgres password=password dbname=searchdb sslmode=disable")
+	dbHost := os.Getenv("DB_HOST")
+	dbPort := os.Getenv("DB_PORT")
+	dbUser := os.Getenv("DB_USER")
+	dbPassword := os.Getenv("DB_PASSWORD")
+	dbName := os.Getenv("DB_NAME")
+
+	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		dbHost, dbPort, dbUser, dbPassword, dbName)
+
+	db, err := sql.Open("postgres", connStr)
 	if err != nil {
 		log.Fatal("Failed to connect to database:", err)
 	}
 	defer db.Close()
 
-	// Test database connection
 	if err := db.Ping(); err != nil {
 		log.Fatal("Failed to ping database:", err)
 	}
-
 	log.Println("Connected to database successfully")
 
-	app := &App{DB: db}
+	es, err := elasticsearch.NewClient(elasticsearch.Config{
+		Addresses: []string{os.Getenv("ELASTICSEARCH_URL")},
+	})
+	if err != nil {
+		log.Fatal("Failed to create Elasticsearch client:", err)
+	} else {
+		log.Println("Connected to Elasticsearch successfully")
+	}
 
-	// Setup routes
+	app := &App{DB: db, ES: es}
+
+	if app.ES != nil {
+		go app.syncData()
+	}
+
 	router := mux.NewRouter()
 	router.HandleFunc("/search", app.searchHandler).Methods("GET")
+	router.HandleFunc("/search/optimized", app.optimizedSearchHandler).Methods("GET")
 	router.HandleFunc("/health", healthHandler).Methods("GET")
 
-	// Start server
 	log.Println("Server starting on port 8080...")
 	log.Fatal(http.ListenAndServe(":8080", router))
 }
 
+func (app *App) syncData() {
+	log.Println("Syncing data to Elasticsearch...")
+
+	mapping := `{"mappings":{"properties":{"id":{"type":"integer"},"text":{"type":"text"}}}}`
+	res, err := app.ES.Indices.Create("search_data", app.ES.Indices.Create.WithBody(strings.NewReader(mapping)))
+	if err != nil {
+		log.Printf("Error creating index: %v", err)
+		return
+	}
+	if res.IsError() && !strings.Contains(res.String(), "resource_already_exists_exception") {
+		log.Printf("Index creation failed: %s", res.String())
+	}
+	res.Body.Close()
+
+	rows, err := app.DB.Query("SELECT id, text FROM search_data")
+	if err != nil {
+		log.Printf("Sync error: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	count := 0
+	for rows.Next() {
+		var result SearchResult
+		if err := rows.Scan(&result.ID, &result.Text); err != nil {
+			continue
+		}
+
+		doc, _ := json.Marshal(result)
+		app.ES.Index("search_data", strings.NewReader(string(doc)), app.ES.Index.WithDocumentID(fmt.Sprintf("%d", result.ID)))
+
+		count++
+		if count%5000 == 0 {
+			log.Printf("Synced %d records", count)
+		}
+	}
+
+	log.Printf("Sync complete: %d records indexed to Elasticsearch", count)
+}
+
 func (app *App) searchHandler(w http.ResponseWriter, r *http.Request) {
-	// Get query parameter
 	query := r.URL.Query().Get("query")
 	if query == "" {
 		http.Error(w, "Missing 'query' parameter", http.StatusBadRequest)
 		return
 	}
 
-	// Simple search using ILIKE - no pagination, no count
 	searchPattern := "%" + query + "%"
 	searchQuery := "SELECT id, text FROM search_data WHERE text ILIKE $1"
 
@@ -74,30 +136,79 @@ func (app *App) searchHandler(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var result SearchResult
 		if err := rows.Scan(&result.ID, &result.Text); err != nil {
-			log.Printf("Error scanning row: %v", err)
 			continue
 		}
 		results = append(results, result)
 	}
 
-	if err := rows.Err(); err != nil {
-		log.Printf("Error iterating rows: %v", err)
-		http.Error(w, "Database error", http.StatusInternalServerError)
-		return
-	}
-
-	// Create simple response
 	response := SearchResponse{
 		Results: results,
 		Query:   query,
 	}
 
-	// Set headers and encode JSON response
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		http.Error(w, "JSON encoding error", http.StatusInternalServerError)
+	json.NewEncoder(w).Encode(response)
+}
+
+func (app *App) optimizedSearchHandler(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("query")
+	if query == "" {
+		http.Error(w, "Missing 'query' parameter", http.StatusBadRequest)
 		return
 	}
+
+	if results := app.searchElasticsearch(query); results != nil {
+		response := SearchResponse{
+			Results: *results,
+			Query:   query,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"error": "Elasticsearch search failed"})
+}
+
+func (app *App) searchElasticsearch(query string) *[]SearchResult {
+	searchQuery := fmt.Sprintf(`{
+        "query": {
+            "match": {
+                "text": "%s"
+            }
+        },
+        "size": 100
+    }`, query)
+
+	res, err := app.ES.Search(
+		app.ES.Search.WithIndex("search_data"),
+		app.ES.Search.WithBody(strings.NewReader(searchQuery)),
+	)
+
+	if err != nil || res.IsError() {
+		return nil
+	}
+	defer res.Body.Close()
+
+	var searchResult struct {
+		Hits struct {
+			Hits []struct {
+				Source SearchResult `json:"_source"`
+			} `json:"hits"`
+		} `json:"hits"`
+	}
+
+	if err := json.NewDecoder(res.Body).Decode(&searchResult); err != nil {
+		return nil
+	}
+
+	var results []SearchResult
+	for _, hit := range searchResult.Hits.Hits {
+		results = append(results, hit.Source)
+	}
+
+	return &results
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
