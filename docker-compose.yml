@@ -37,6 +37,40 @@ services:
       timeout: 5s
       retries: 20
 
+  kibana:
+    image: docker.elastic.co/kibana/kibana:7.17.24
+    container_name: kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - xpack.security.enabled=false
+      - xpack.apm.ui.enabled=true
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5601/api/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  apm-server:
+    image: docker.elastic.co/apm/apm-server:7.17.24
+    container_name: apm-server
+    ports:
+      - "8200:8200"
+    depends_on:
+      - elasticsearch
+    restart: unless-stopped
+    command: >
+      apm-server -e
+      -E output.elasticsearch.hosts=["elasticsearch:9200"]
+      -E apm-server.host=0.0.0.0:8200
+      -E apm-server.auth.anonymous.enabled=true
+      -E apm-server.auth.anonymous.allow_agent=["rum-js","js-base","nodejs","python","dotnet","ruby","java","go"]
+      -E logging.level=info
+
   api:
     build: .
     ports:
@@ -46,6 +80,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      apm-server:
+        condition: service_started
     restart: unless-stopped
     environment:
       - DB_HOST=postgres

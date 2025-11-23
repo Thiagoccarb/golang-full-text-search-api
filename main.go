@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,11 @@ import (
 	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/gorilla/mux"
 	_ "github.com/lib/pq"
+
+	"go.elastic.co/apm/module/apmgorilla/v2"
+	"go.elastic.co/apm/module/apmsql/v2"
+	_ "go.elastic.co/apm/module/apmsql/v2/pq"
+	"go.elastic.co/apm/v2"
 )
 
 type SearchResult struct {
@@ -30,6 +36,8 @@ type App struct {
 }
 
 func main() {
+	apm.DefaultTracer()
+
 	dbHost := os.Getenv("DB_HOST")
 	dbPort := os.Getenv("DB_PORT")
 	dbUser := os.Getenv("DB_USER")
@@ -39,7 +47,7 @@ func main() {
 	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
 		dbHost, dbPort, dbUser, dbPassword, dbName)
 
-	db, err := sql.Open("postgres", connStr)
+	db, err := apmsql.Open("postgres", connStr)
 	if err != nil {
 		log.Fatal("Failed to connect to database:", err)
 	}
@@ -66,6 +74,7 @@ func main() {
 	}
 
 	router := mux.NewRouter()
+	router.Use(apmgorilla.Middleware())
 	router.HandleFunc("/search", app.searchHandler).Methods("GET")
 	router.HandleFunc("/search/optimized", app.optimizedSearchHandler).Methods("GET")
 	router.HandleFunc("/health", healthHandler).Methods("GET")
@@ -124,7 +133,7 @@ func (app *App) searchHandler(w http.ResponseWriter, r *http.Request) {
 	searchPattern := "%" + query + "%"
 	searchQuery := "SELECT id, text FROM search_data WHERE text ILIKE $1"
 
-	rows, err := app.DB.Query(searchQuery, searchPattern)
+	rows, err := app.DB.QueryContext(r.Context(), searchQuery, searchPattern)
 	if err != nil {
 		log.Printf("Error executing search: %v", err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
@@ -157,7 +166,7 @@ func (app *App) optimizedSearchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if results := app.searchElasticsearch(query); results != nil {
+	if results := app.searchElasticsearch(r.Context(), query); results != nil {
 		response := SearchResponse{
 			Results: *results,
 			Query:   query,
@@ -171,7 +180,10 @@ func (app *App) optimizedSearchHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"error": "Elasticsearch search failed"})
 }
 
-func (app *App) searchElasticsearch(query string) *[]SearchResult {
+func (app *App) searchElasticsearch(ctx context.Context, query string) *[]SearchResult {
+	span, ctx := apm.StartSpan(ctx, "elasticsearch_search", "db.elasticsearch")
+	defer span.End()
+
 	searchQuery := fmt.Sprintf(`{
         "query": {
             "match": {
@@ -184,6 +196,7 @@ func (app *App) searchElasticsearch(query string) *[]SearchResult {
 	res, err := app.ES.Search(
 		app.ES.Search.WithIndex("search_data"),
 		app.ES.Search.WithBody(strings.NewReader(searchQuery)),
+		app.ES.Search.WithContext(ctx),
 	)
 
 	if err != nil || res.IsError() {
