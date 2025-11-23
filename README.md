@@ -184,21 +184,49 @@ curl "http://localhost:8081/health"
 2. **Navegue**: Observability → APM → Services
 3. **Selecione**: `full-text-search-api`
 
+### 📸 Exemplos Visuais do APM
+
+**📈 Comparação de Performance entre Endpoints:**
+
+![APM Overview - Elasticsearch Search](image.png)
+*Trace do endpoint `/search/optimized` (Elasticsearch) - 15ms de latência*
+
+![APM Overview - PostgreSQL Search](image-1.png)
+*Trace do endpoint `/search` (PostgreSQL) - 137ms de latência*
+
+**📊 Dashboard do Serviço:**
+
+![APM Service Dashboard](image-2.png)
+*Dashboard completo mostrando latência, throughput e comparação entre os dois endpoints*
+
 ### 🔍 Métricas Disponíveis
 
-- **Tempo de Resposta**: Compare `/search` vs `/search/optimized`
-- **Throughput**: Requisições por minuto
-- **Erro Rate**: Percentual de erros
+Como mostrado nas imagens acima, você pode comparar:
+
+- **Tempo de Resposta**: 
+  - **Elasticsearch**: ~15ms (mais rápido)
+  - **PostgreSQL**: ~137ms (mais lento)
+- **Throughput**: Requisições por minuto para cada endpoint
+- **Erro Rate**: Percentual de erros (0% em ambos os casos)
 - **Database Queries**: Performance das consultas SQL
 - **Elasticsearch Traces**: Tempo de busca no ES
 - **Service Map**: Visualização das dependências
 
 ### 📈 Dashboards Principais
 
-1. **Service Overview**: Métricas gerais da aplicação
-2. **Transactions**: Performance por endpoint
+1. **Service Overview**: Métricas gerais da aplicação (imagem 3)
+2. **Transactions**: Performance por endpoint com comparação lado a lado
 3. **Dependencies**: Mapa de serviços
-4. **Errors**: Análise de erros
+4. **Errors**: Análise de erros (nenhum erro encontrado no exemplo)
+
+### 🎯 Insights das Métricas
+
+Com base nas capturas de tela do APM:
+
+- **Elasticsearch é ~9x mais rápido** que PostgreSQL (15ms vs 137ms)
+- **Ambos os endpoints têm 0% de erro**, indicando estabilidade
+- **Spans detalhados** mostram o tempo gasto em cada operação (query SQL vs busca ES)
+- **Traces completos** permitem debug preciso de performance
 
 ## 📁 Estrutura do Projeto
 
@@ -332,3 +360,9 @@ Sinta-se à vontade para abrir issues e pull requests para melhorar este projeto
 ## 📄 Licença
 
 MIT License - veja o arquivo LICENSE para detalhes.
+
+![alt text](image.png)
+
+![alt text](image-1.png)
+
+![alt text](image-2.png)
